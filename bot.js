@@ -704,16 +704,22 @@ async function connect() {
             }
         });
 
+
         ws.on('error', err => {
-            console.error('⚠️ WebSocket Error:', err.message);
-        });
-    } catch (error) {
-        console.error('❌ Connection/Auth error:', error.message);
-        scheduleReconnect(5000);
-    } finally {
-        connecting = false;
+    console.error('⚠️ WebSocket Error:', err.message);
+
+    // WebSocket handshake sırasında sunucu HTTP 401 döndürdü.
+    if (
+        err.message &&
+        /Unexpected server response:\s*401/i.test(err.message)
+    ) {
+        console.warn(
+            '🔐 WebSocket HTTP 401 döndürdü. Token yenileme başlatılıyor...'
+        );
+
+        handleAuthError(ws, 'WebSocket HTTP 401');
     }
-}
+});
 
 server.listen(PORT, () => {
     console.log(`🚀 Server started: http://localhost:${PORT}`);
