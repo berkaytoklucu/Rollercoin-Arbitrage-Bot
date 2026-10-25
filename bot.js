@@ -72,7 +72,6 @@ try {
 
 const app = express();
 const server = http.createServer(app);
-
 const localWss = new WebSocket.Server({ server });
 
 let totalScannedCount = 0;
@@ -239,7 +238,6 @@ async function fetchItemMetadata(itemId, itemType) {
             const body = await response.text();
             console.error('Error body:', body);
 
-            // HTTP 401, access tokenın geçersiz olduğunu gösterebilir.
             if (response.status === 401) {
                 console.warn(
                     '🔐 item-info API returned HTTP 401. Token may be invalid.'
@@ -311,13 +309,8 @@ function subtractOneUnit(priceMicro) {
  * =========================================================
  */
 
-// Tek bir yeniden bağlanma zamanlayıcısı.
 let reconnectTimer = null;
-
-// Refresh sırasında birden fazla işlem başlatılmasını engeller.
 let authRefreshInProgress = false;
-
-// Birden fazla connect() çağrısının aynı anda çalışmasını engeller.
 let connecting = false;
 
 function scheduleReconnect(delay = 5000) {
@@ -381,8 +374,6 @@ function isAuthenticationError(payload) {
 function isAuthenticationClose(code, reason) {
     const reasonText = reason ? reason.toString() : '';
 
-    // 1008 is a policy violation; only refresh if the reason also
-    // clearly indicates an authentication/token problem.
     const authReasonPattern =
         /invalid token|token expired|expired token|unauthorized|authentication failed|jwt expired|invalid access token/i;
 
@@ -401,24 +392,18 @@ async function handleAuthError(ws, source = 'WebSocket') {
             `🔐 Authentication error detected (${source}). Refreshing token...`
         );
 
-        // AuthManager tek bir refresh işlemini paylaşır.
         await auth.refresh();
 
         console.log(
             '✅ Token refreshed. Reconnecting with the new access token...'
         );
 
-        if (
-            ws &&
-            (
-                ws.readyState === WebSocket.OPEN ||
-                ws.readyState === WebSocket.CONNECTING
-            )
-        ) {
+        if (ws && ws.readyState === WebSocket.OPEN) {
             ws.close(1000, 'Authentication token refreshed');
+        } else if (ws && ws.readyState === WebSocket.CONNECTING) {
+            ws.terminate();
         }
 
-        // close eventinden bağımsız olarak tek bir reconnect planla.
         scheduleReconnect(1000);
     } catch (error) {
         console.error(
@@ -426,8 +411,6 @@ async function handleAuthError(ws, source = 'WebSocket') {
             error.message
         );
 
-        // Refresh başarısızsa eski refresh tokenı tekrar tekrar
-        // tüketmeye çalışma. Bir süre sonra bağlantıyı yeniden dene.
         scheduleReconnect(30000);
     } finally {
         authRefreshInProgress = false;
@@ -452,7 +435,7 @@ async function connect() {
     try {
         console.log('🔍 CONNECT: starting');
 
-        // Geçerli tokenı alır; token süresine göre proaktif refresh yok.
+        // Token süresine göre proaktif refresh yapılmaz.
         const token = await auth.getAccessToken();
 
         console.log('🔍 CONNECT: token acquired');
@@ -477,8 +460,6 @@ async function connect() {
             console.log(
                 '------------------------------------------------------------------'
             );
-
-            // Burada token süresine göre refresh zamanlayıcısı yok.
         });
 
         ws.on('message', async data => {
@@ -487,11 +468,9 @@ async function connect() {
             try {
                 payload = JSON.parse(data.toString());
             } catch (error) {
-                // JSON olmayan mesajları mevcut davranış gibi yok say.
                 return;
             }
 
-            // Sadece açık bir kimlik doğrulama hatasında refresh yap.
             if (isAuthenticationError(payload)) {
                 await handleAuthError(ws, 'WebSocket message');
                 return;
@@ -697,29 +676,44 @@ async function connect() {
                 return;
             }
 
-            // Normal kopmalarda refresh yok.
-            // Refresh işlemi zaten sürüyorsa handleAuthError yönetir.
             if (!authRefreshInProgress) {
                 scheduleReconnect(5000);
             }
         });
 
-
         ws.on('error', err => {
-    console.error('⚠️ WebSocket Error:', err.message);
+            console.error('⚠️ WebSocket Error:', err.message);
 
-    // WebSocket handshake sırasında sunucu HTTP 401 döndürdü.
-    if (
-        err.message &&
-        /Unexpected server response:\s*401/i.test(err.message)
-    ) {
-        console.warn(
-            '🔐 WebSocket HTTP 401 döndürdü. Token yenileme başlatılıyor...'
+            // WebSocket handshake sırasında HTTP 401 geldiyse
+            // token refresh işlemini başlat.
+            if (
+                err.message &&
+                /Unexpected server response:\s*401/i.test(err.message)
+            ) {
+                console.warn(
+                    '🔐 WebSocket HTTP 401 döndürdü. Token yenileme başlatılıyor...'
+                );
+
+                handleAuthError(ws, 'WebSocket HTTP 401');
+            }
+        });
+    } catch (error) {
+        console.error(
+            '❌ Connection/Auth error:',
+            error.message
         );
 
-        handleAuthError(ws, 'WebSocket HTTP 401');
+        scheduleReconnect(5000);
+    } finally {
+        connecting = false;
     }
-});
+}
+
+/*
+ * =========================================================
+ * HTTP SERVER
+ * =========================================================
+ */
 
 server.listen(PORT, () => {
     console.log(`🚀 Server started: http://localhost:${PORT}`);
