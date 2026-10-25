@@ -1,60 +1,33 @@
 
 const jwt = require('jsonwebtoken');
+const fs = require('fs');
+const path = require('path');
 
 class AuthManager {
     constructor() {
         this.accessToken = process.env.TOKEN || '';
         this.refreshToken = process.env.REFRESH_TOKEN || '';
         this.refreshPromise = null;
-    }
-
-    isAccessTokenExpired() {
-        console.log(
-            'TOKEN exists:',
-            Boolean(this.accessToken)
-        );
-
-        let decoded;
-
-        try {
-            decoded = jwt.decode(this.accessToken || '');
-        } catch {
-            decoded = null;
-        }
-
-        const exp = decoded?.exp;
-
-        console.log(
-            'TOKEN exp:',
-            typeof exp === 'number' ? exp : 'missing'
-        );
-
-        const expired =
-            !this.accessToken ||
-            typeof exp !== 'number' ||
-            Date.now() >= exp * 1000 - 60000;
-
-        console.log('TOKEN expired:', expired);
-
-        return expired;
+        this.envPath = path.resolve(process.cwd(), '.env');
     }
 
     getTokenExpiration() {
-        if (!this.accessToken) {
-            return null;
-        }
-
         try {
-            const decoded = jwt.decode(this.accessToken);
-
-            if (typeof decoded?.exp !== 'number') {
-                return null;
-            }
-
-            return decoded.exp * 1000;
+            const decoded = jwt.decode(this.accessToken || '');
+            return typeof decoded?.exp === 'number'
+                ? decoded.exp * 1000
+                : null;
         } catch {
             return null;
         }
+    }
+
+    async getAccessToken() {
+        if (!this.accessToken) {
+            return await this.refresh();
+        }
+
+        return this.accessToken;
     }
 
     async refresh() {
@@ -73,10 +46,10 @@ class AuthManager {
 
     async _refresh() {
         if (!this.refreshToken) {
-            throw new Error('REFRESH_TOKEN not found.');
+            throw new Error('REFRESH_TOKEN bulunamadı.');
         }
 
-        console.log('🔄 Refresh token is being used...');
+        console.log('🔄 Refresh token kullanılıyor...');
 
         const response = await fetch(
             'https://rollercoin.com/api/auth/refresh',
@@ -96,31 +69,21 @@ class AuthManager {
         );
 
         const responseText = await response.text();
-
         let result;
 
         try {
             result = JSON.parse(responseText);
         } catch {
             throw new Error(
-                `Refresh endpoint returned non-JSON response (HTTP ${response.status})`
+                `Refresh yanıtı JSON değil. HTTP ${response.status}`
             );
         }
 
-        if (!response.ok) {
-            console.error(
-                '❌ Refresh response:',
-                JSON.stringify(result, null, 2)
-            );
-
+        if (!response.ok || !result.success || !result.data) {
             throw new Error(
-                `Refresh failed: HTTP ${response.status} - ${result.error || 'Unknown error'}`
-            );
-        }
-
-        if (!result.success || !result.data) {
-            throw new Error(
-                `Refresh denied: ${result.error || 'Unknown error'}`
+                `Refresh başarısız: HTTP ${response.status} - ${
+                    result.error || 'Bilinmeyen hata'
+                }`
             );
         }
 
@@ -128,34 +91,66 @@ class AuthManager {
         const newRefreshToken = result.data.refresh_token;
 
         if (!newAccessToken || !newRefreshToken) {
-            throw new Error('Tokens not found in refresh response.');
+            throw new Error('Yanıtta yeni tokenlar bulunamadı.');
         }
 
         this.accessToken = newAccessToken;
         this.refreshToken = newRefreshToken;
-
-        process.env.TOKEN = newAccessToken;
-        process.env.REFRESH_TOKEN = newRefreshToken;
+        this.saveTokensToEnv();
 
         const expiration = this.getTokenExpiration();
 
-        console.log('✅ Access token refreshed.');
+        console.log('✅ Tokenlar yenilendi ve .env güncellendi.');
 
         if (expiration) {
             console.log(
-                `⏰ New token expires: ${new Date(expiration).toISOString()}`
+                `⏰ Yeni token son kullanma zamanı: ${
+                    new Date(expiration).toISOString()
+                }`
             );
         }
 
         return this.accessToken;
     }
 
-    async getAccessToken() {
-        if (this.isAccessTokenExpired()) {
-            return await this.refresh();
+    saveTokensToEnv() {
+        let envContent = '';
+
+        if (fs.existsSync(this.envPath)) {
+            envContent = fs.readFileSync(this.envPath, 'utf8');
         }
 
-        return this.accessToken;
+        const setEnvValue = (content, key, value) => {
+            const line = `${key}=${value}`;
+            const pattern = new RegExp(`^${key}=.*$`, 'm');
+
+            if (pattern.test(content)) {
+                return content.replace(pattern, line);
+            }
+
+            return content + (content && !content.endsWith('\n') ? '\n' : '')
+                + line + '\n';
+        };
+
+        envContent = setEnvValue(
+            envContent,
+            'TOKEN',
+            this.accessToken
+        );
+
+        envContent = setEnvValue(
+            envContent,
+            'REFRESH_TOKEN',
+            this.refreshToken
+        );
+
+        fs.writeFileSync(this.envPath, envContent, {
+            encoding: 'utf8',
+            mode: 0o600
+        });
+
+        process.env.TOKEN = this.accessToken;
+        process.env.REFRESH_TOKEN = this.refreshToken;
     }
 }
 
